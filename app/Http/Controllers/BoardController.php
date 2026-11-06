@@ -16,7 +16,8 @@ class BoardController extends Controller
     public function __invoke(Request $request): JsonResponse
     {
         $filters = $request->validate([
-            'project_id' => ['nullable', 'integer', Rule::exists('projects', 'id')],
+            'project_id' => ['required_with:milestone_id', 'nullable', 'integer', Rule::exists('projects', 'id')],
+            'milestone_id' => ['nullable', 'integer', Rule::exists('milestones', 'id')->where('project_id', $request->integer('project_id'))],
             'month' => ['sometimes', 'date_format:Y-m'],
             'include_done' => ['sometimes', 'boolean'],
             'assignee' => ['sometimes', 'required', Rule::in(Task::ASSIGNEES)],
@@ -26,8 +27,9 @@ class BoardController extends Controller
         $includeDone = $request->boolean('include_done', config('memyselfai.calendar_include_done'));
 
         $tasks = Task::query()
-            ->with(['project', 'milestone'])
+            ->with(['project', 'milestone', 'dependsOn'])
             ->when($filters['project_id'] ?? null, fn ($query, $projectId) => $query->where('project_id', $projectId))
+            ->when($filters['milestone_id'] ?? null, fn ($query, $milestoneId) => $query->where('milestone_id', $milestoneId))
             ->when($filters['assignee'] ?? null, fn ($query, $assignee) => $query->where('assignee', $assignee))
             ->orderByRaw('due_date IS NULL')
             ->orderBy('due_date')
@@ -64,6 +66,7 @@ class BoardController extends Controller
             'calendar' => [
                 'month' => $monthKey,
                 'project_id' => isset($filters['project_id']) ? (int) $filters['project_id'] : null,
+                'milestone_id' => isset($filters['milestone_id']) ? (int) $filters['milestone_id'] : null,
                 'assignee' => $filters['assignee'] ?? null,
                 'include_done' => $includeDone,
                 'days' => $calendarDays,

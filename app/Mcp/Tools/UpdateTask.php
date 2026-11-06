@@ -13,7 +13,7 @@ use Laravel\Mcp\Server\Attributes\Name;
 use Laravel\Mcp\Server\Tools\Annotations\IsIdempotent;
 
 #[Name('update_task')]
-#[Description('Partially update an existing task: name, description, priority, status, assignee or due_date. Set description or due_date to null to clear them. Cannot change project or milestone, or delete a task. Works for both human and agent tasks.')]
+#[Description('Partially update an existing task: name, description, priority, status, assignee, due_date or depends_on_task_id. Set description, due_date or depends_on_task_id to null to clear them. A dependency must be in the same project and cannot create a cycle. Cannot change project or milestone, or delete a task. Works for both human and agent tasks.')]
 #[IsIdempotent]
 class UpdateTask extends TaskTool
 {
@@ -33,6 +33,6 @@ class UpdateTask extends TaskTool
         $this->requireChanges($data);
         $task->update($data);
 
-        return Response::structured(['data' => (new TaskResource($task->refresh()->load(['project', 'milestone'])))->resolve()]);
+        return Response::structured(['data' => (new TaskResource($task->refresh()->load(['project', 'milestone', 'dependsOn'])))->resolve()]);
     }
 }

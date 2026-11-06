@@ -250,6 +250,61 @@ it('paginates projects and filters milestone dates independently of task dates',
         ->assertJsonPath('result.structuredContent.data.0.id', $second->id);
 });
 
+it('creates replaces reads and clears task dependencies through MCP without blocking completion', function (): void {
+    $previous = Task::factory()->create(['name' => 'Prepare the API']);
+    $replacement = Task::factory()->for($previous->project)->create();
+
+    $id = mcpCall('create_task', [
+        'name' => 'Build the interface', 'project_id' => $previous->project_id, 'depends_on_task_id' => $previous->id,
+    ])->assertOk()->assertJsonPath('result.isError', false)
+        ->assertJsonPath('result.structuredContent.data.depends_on', ['id' => $previous->id, 'name' => 'Prepare the API'])
+        ->json('result.structuredContent.data.id');
+    $this->assertDatabaseHas('tasks', ['id' => $id, 'depends_on_task_id' => $previous->id]);
+    mcpCall('get_task', ['task_id' => $id])->assertOk()
+        ->assertJsonPath('result.structuredContent.data.depends_on_task_id', $previous->id);
+    mcpCall('list_tasks', ['project_id' => $previous->project_id, 'search' => 'Build the interface'])->assertOk()
+        ->assertJsonPath('result.structuredContent.data.0.depends_on.id', $previous->id);
+    mcpCall('update_task', ['task_id' => $id, 'depends_on_task_id' => $replacement->id])->assertOk()
+        ->assertJsonPath('result.isError', false)->assertJsonPath('result.structuredContent.data.depends_on.id', $replacement->id);
+    mcpCall('update_task', ['task_id' => $id, 'status' => 'done'])->assertOk()
+        ->assertJsonPath('result.structuredContent.data.status', 'done')
+        ->assertJsonPath('result.structuredContent.data.depends_on_task_id', $replacement->id);
+    $this->assertDatabaseHas('tasks', ['id' => $id, 'status' => 'done', 'depends_on_task_id' => $replacement->id]);
+    mcpCall('update_task', ['task_id' => $id, 'depends_on_task_id' => null])->assertOk()
+        ->assertJsonPath('result.structuredContent.data.depends_on', null);
+    $this->assertDatabaseHas('tasks', ['id' => $id, 'depends_on_task_id' => null]);
+    expect(mcpCall('get_context')->json('result.structuredContent.permissions.task_update_fields'))
+        ->toContain('depends_on_task_id');
+});
+
+it('rejects unknown and cross-project dependencies through MCP before writing', function (bool $unknown): void {
+    $task = Task::factory()->create(['status' => 'todo']);
+    $dependencyId = $unknown ? 99999 : Task::factory()->create()->id;
+    $count = Task::count();
+
+    mcpCall('create_task', [
+        'name' => 'Invalid dependency', 'project_id' => $task->project_id, 'depends_on_task_id' => $dependencyId,
+    ])->assertOk()->assertJsonPath('result.isError', true);
+    mcpCall('update_task', ['task_id' => $task->id, 'status' => 'done', 'depends_on_task_id' => $dependencyId])
+        ->assertOk()->assertJsonPath('result.isError', true);
+
+    $this->assertDatabaseCount('tasks', $count);
+    $this->assertDatabaseHas('tasks', ['id' => $task->id, 'status' => 'todo', 'depends_on_task_id' => null]);
+})->with(['unknown task' => true, 'another project' => false]);
+
+it('rejects self dependencies and direct or indirect cycles through MCP', function (int $length): void {
+    $first = Task::factory()->create(['name' => 'Keep this task']);
+    $last = $first;
+    for ($index = 0; $index < $length; $index++) {
+        $last = Task::factory()->for($first->project)->create(['depends_on_task_id' => $last->id]);
+    }
+
+    mcpCall('update_task', ['task_id' => $first->id, 'name' => 'Invalid update', 'depends_on_task_id' => $last->id])
+        ->assertOk()->assertJsonPath('result.isError', true);
+
+    $this->assertDatabaseHas('tasks', ['id' => $first->id, 'name' => 'Keep this task', 'depends_on_task_id' => null]);
+})->with(['self dependency' => 0, 'direct cycle' => 1, 'indirect cycle' => 3]);
+
 it('creates tasks with the same defaults as the UI and reads their details', function (): void {
     $project = Project::factory()->create();
     $id = mcpCall('create_task', ['name' => 'New task', 'project_id' => $project->id])->assertOk()

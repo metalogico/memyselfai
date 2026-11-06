@@ -13,7 +13,7 @@ use Laravel\Mcp\Server\Attributes\Name;
 use Laravel\Mcp\Server\Tools\Annotations\IsDestructive;
 
 #[Name('create_task')]
-#[Description('Create a task in an existing project and optional milestone. Defaults: assignee me, priority medium, status backlog. Creating an agent-assigned task does not execute it.')]
+#[Description('Create a task in an existing project and optional milestone, optionally depending on another task in that project. Defaults: assignee me, priority medium, status backlog. Creating an agent-assigned task does not execute it.')]
 #[IsDestructive(false)]
 class CreateTask extends TaskTool
 {
@@ -25,7 +25,7 @@ class CreateTask extends TaskTool
     public function handle(Request $request): ResponseFactory
     {
         $data = $this->validateArguments($request, $this->taskRules(creating: true, projectId: $request->get('project_id')));
-        $task = Task::create($data)->refresh()->load(['project', 'milestone']);
+        $task = Task::create($data)->refresh()->load(['project', 'milestone', 'dependsOn']);
 
         return Response::structured(['data' => (new TaskResource($task))->resolve()]);
     }

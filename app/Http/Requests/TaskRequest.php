@@ -26,6 +26,7 @@ class TaskRequest extends FormRequest
             'status' => ['sometimes', 'required', Rule::in(Task::STATUSES)],
             'assignee' => ['sometimes', 'required', Rule::in(Task::ASSIGNEES)],
             'due_date' => ['sometimes', 'nullable', 'date_format:Y-m-d'],
+            'depends_on_task_id' => ['sometimes', 'nullable', 'integer', 'min:1'],
             'project_id' => [
                 $this->isMethod('POST') ? 'required' : 'sometimes',
                 'required',

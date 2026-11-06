@@ -18,6 +18,6 @@ Route::prefix('api/v1')->name('api.')->group(function (): void {
         Route::get('board', BoardController::class)->name('board');
         Route::apiResource('projects', ProjectController::class)->only(['store', 'update', 'destroy']);
         Route::apiResource('milestones', MilestoneController::class)->only(['store', 'update', 'destroy']);
-        Route::apiResource('tasks', TaskController::class)->only(['store', 'update', 'destroy']);
+        Route::apiResource('tasks', TaskController::class);
     });
 });

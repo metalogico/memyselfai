@@ -52,7 +52,7 @@ class ListTasks extends MeMyselfAiTool
             ...$this->paginationRules(),
         ]);
 
-        $query = Task::query()->with(['project', 'milestone']);
+        $query = Task::query()->with(['project', 'milestone', 'dependsOn']);
         foreach (['project_id', 'milestone_id', 'assignee'] as $field) {
             if (isset($filters[$field])) {
                 $query->where($field, $filters[$field]);

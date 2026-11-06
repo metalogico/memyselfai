@@ -17,6 +17,7 @@ abstract class TaskTool extends MeMyselfAiTool
             'status' => $schema->string()->enum(Task::STATUSES)->description('Default for new tasks: backlog.'),
             'assignee' => $schema->string()->enum(Task::ASSIGNEES)->description('me = human, agent = AI. Default for new tasks: me.'),
             'due_date' => $schema->string()->nullable()->description('Calendar date YYYY-MM-DD; set null to remove the deadline.'),
+            'depends_on_task_id' => $schema->integer()->min(1)->nullable()->description('Optional prerequisite task in the same project. Set null to remove it. Cannot refer to itself or create a cycle. Does not block status changes.'),
         ];
 
         if ($creating) {
@@ -36,6 +37,7 @@ abstract class TaskTool extends MeMyselfAiTool
             'status' => ['sometimes', 'required', Rule::in(Task::STATUSES)],
             'assignee' => ['sometimes', 'required', Rule::in(Task::ASSIGNEES)],
             'due_date' => ['sometimes', 'nullable', 'date_format:Y-m-d'],
+            'depends_on_task_id' => ['sometimes', 'nullable', 'integer', 'min:1'],
         ];
 
         if ($creating) {

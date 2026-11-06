@@ -12,8 +12,7 @@
     body {
         @apply bg-[#f7f8f5] text-stone-800 antialiased;
     }
-    button,
-    select {
+    button {
         @apply cursor-pointer;
     }
     button:disabled {
@@ -51,11 +50,10 @@
             text-stone-800 outline-none focus:border-emerald-700 focus:ring-2
             focus:ring-emerald-700/10;
     }
-    .select-field {
-        @apply appearance-none bg-no-repeat pr-10;
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2378716c' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-        background-position: right 0.75rem center;
-        background-size: 1rem;
+    .filter-action {
+        @apply
+            inline-flex h-full w-9 shrink-0 items-center justify-center border-l
+            border-stone-200 text-stone-500 transition hover:bg-stone-50;
     }
     .label {
         @apply mb-1.5 block text-xs font-medium text-stone-600;
@@ -80,22 +78,156 @@
     .mini-day {
         @apply flex h-5 items-center justify-center rounded-md bg-stone-100/70 text-[10px] text-stone-500;
     }
+    .mini-today {
+        --tw-ring-color: var(--calendar-accent, var(--color-emerald-800));
+    }
     .heat-1 {
-        @apply bg-[#dce8cf]! text-[#46613b]!;
+        background-color: var(--calendar-heat-1, #dce8cf) !important;
+        color: var(--calendar-heat-1-text, #46613b) !important;
     }
     .heat-2 {
-        @apply bg-[#b7cf9e]! text-[#35502c]!;
+        background-color: var(--calendar-heat-2, #b7cf9e) !important;
+        color: var(--calendar-heat-2-text, #35502c) !important;
     }
     .heat-3 {
-        @apply bg-[#7da374]! text-white!;
+        background-color: var(--calendar-heat-3, #7da374) !important;
+        color: var(--calendar-heat-3-text, #fff) !important;
     }
     .heat-4 {
-        @apply bg-[#375f44]! text-white!;
+        background-color: var(--calendar-heat-4, #375f44) !important;
+        color: var(--calendar-heat-4-text, #fff) !important;
     }
     .nav-item {
         @apply flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs text-stone-500 transition hover:bg-stone-100;
     }
     .nav-active {
         @apply bg-[#e7ede3]! font-semibold text-forest!;
+    }
+}
+
+.app-select,
+.app-select-dropdown {
+    --el-color-primary: #244f3d;
+    --el-color-primary-light-9: #eff6f1;
+    --el-border-color: #e7e5e4;
+    --el-border-color-hover: #d6d3d1;
+    --el-border-radius-base: 8px;
+    --el-text-color-regular: #44403c;
+    --el-text-color-placeholder: #78716c;
+    --el-font-size-base: 13px;
+    --el-font-family: var(--font-sans);
+}
+
+.app-select {
+    width: 100%;
+    min-width: 0;
+}
+
+.app-select .el-select__wrapper {
+    min-height: 36px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+}
+
+.app-select-compact .el-select__wrapper {
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.app-select-active .el-select__wrapper {
+    background-color: #ecfdf5b3;
+    box-shadow: 0 0 0 1px #0478574d inset;
+}
+
+.app-select-active .el-select__placeholder {
+    color: #244f3d;
+}
+
+.app-select-joined .el-select__wrapper {
+    min-height: 34px;
+    padding-block: 5px;
+    border-radius: 7px 0 0 7px;
+    background-color: transparent;
+    box-shadow: none;
+}
+
+.app-select-joined .el-select__wrapper.is-focused {
+    box-shadow: 0 0 0 1px #244f3d inset;
+}
+
+.app-select .el-select__input:focus-visible {
+    outline: none;
+}
+
+.app-select-dropdown .el-select-dropdown__wrap {
+    max-height: min(240px, 36dvh);
+}
+
+.workspace-dialog {
+    max-height: calc(100dvh - 24px);
+    overflow: visible;
+}
+
+.workspace-dialog form {
+    display: flex;
+    max-height: inherit;
+    flex-direction: column;
+}
+
+.dialog-header,
+.dialog-footer {
+    flex-shrink: 0;
+}
+
+.dialog-body {
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.dialog-body .field {
+    min-height: 36px;
+    padding: 7px 10px;
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.task-form .form-description textarea {
+    height: 0;
+    min-height: clamp(106px, calc(100dvh - 600px), 260px);
+}
+
+@media (max-width: 639px) {
+    .task-form .form-description textarea {
+        height: clamp(56px, 12dvh, 100px);
+        min-height: 0;
+        flex: none;
+    }
+}
+
+@media (max-width: 639px) and (max-height: 600px) {
+    .task-form .form-description textarea {
+        height: 56px;
+    }
+}
+
+@media (max-height: 700px) {
+    .workspace-dialog .dialog-header,
+    .workspace-dialog .dialog-footer {
+        padding-block: 8px;
+    }
+
+    .workspace-dialog .dialog-body {
+        gap: 8px;
+        padding: 12px 16px;
+    }
+
+    .dialog-body > .grid {
+        gap: 8px;
+    }
+
+    .dialog-footer .btn {
+        min-height: 36px;
+        padding-block: 6px;
     }
 }

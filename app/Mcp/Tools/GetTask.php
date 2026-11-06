@@ -13,7 +13,7 @@ use Laravel\Mcp\Server\Attributes\Name;
 use Laravel\Mcp\Server\Tools\Annotations\IsReadOnly;
 
 #[Name('get_task')]
-#[Description('Read all details of an existing task, including its project and optional milestone.')]
+#[Description('Read all details of an existing task, including its project, optional milestone and prerequisite task.')]
 #[IsReadOnly]
 class GetTask extends MeMyselfAiTool
 {
@@ -25,7 +25,7 @@ class GetTask extends MeMyselfAiTool
     public function handle(Request $request): ResponseFactory
     {
         $data = $this->validateArguments($request, ['task_id' => ['required', 'integer', 'min:1', 'exists:tasks,id']]);
-        $task = Task::query()->with(['project', 'milestone'])->findOrFail($data['task_id']);
+        $task = Task::query()->with(['project', 'milestone', 'dependsOn'])->findOrFail($data['task_id']);
 
         return Response::structured(['data' => (new TaskResource($task))->resolve()]);
     }

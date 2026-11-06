@@ -1,20 +1,25 @@
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, toRefs, watch } from 'vue';
 import Icon from './components/Icon.vue';
 import MiniCalendar from './components/MiniCalendar.vue';
 import TaskCard from './components/TaskCard.vue';
+import TaskDependencySelect from './components/TaskDependencySelect.vue';
+import AppSelect from './components/AppSelect.vue';
 import { assignees } from './assignees';
+import { readWorkspaceState, workspaceUrl } from './workspaceState';
 import {
+    calendarDropPayload,
     currentMonth,
     formatDate,
     monthCells,
     monthLabel,
+    openTaskCalendar,
     priorities,
     shiftMonth,
     statuses,
 } from './calendar';
 
-const logoUrl = '/logo.svg';
+const logoUrl = '/logo.svg?v=mmai-circles-1';
 const ready = ref(false);
 const authenticated = ref(false);
 const configured = ref(true);
@@ -25,23 +30,25 @@ const error = ref('');
 const formError = ref('');
 const saving = ref(false);
 const loading = ref(false);
-const projectId = ref('');
-const month = ref(currentMonth());
-const includeDone = ref(false);
-const assignee = ref('');
-const view = ref('board');
-const calendarProjectId = ref('');
-const calendarMonth = ref(currentMonth());
+const workspace = reactive(readWorkspaceState(window.location.search));
+const { projectId, milestoneId, month, includeDone, assignee, view } = toRefs(workspace);
 const board = ref({ tasks: [], projects: [], milestones: [], calendar: { days: [], total: 0 } });
-const extendedCalendar = ref({ days: [], total: 0 });
-const calendarLoading = ref(false);
 const dragStatus = ref('');
+const dragDay = ref('');
+const draggedTaskId = ref(null);
 const dialog = ref(null);
 const modalType = ref('task');
 const editingId = ref(null);
 const form = reactive({});
+const formDependency = ref(null);
+const initialFormSnapshot = ref('');
+const openingDependency = ref(false);
+const modalOpen = ref(false);
+let latestDependencyNavigation = 0;
 let latestBoardRequest = 0;
-let latestCalendarRequest = 0;
+let workspaceLoaded = false;
+let restoringHistory = false;
+let defaultIncludeDone = false;
 
 const resourcesByType = {
     task: 'tasks',
@@ -65,11 +72,20 @@ const projectColors = [
     { name: 'Gray', value: '#95a1b8' },
 ];
 
+const assigneeOptions = Object.entries(assignees).map(([value, label]) => ({ value, label }));
+const priorityOptions = Object.entries(priorities).map(([value, label]) => ({ value, label }));
+const statusOptions = statuses.map((status) => ({ value: status.key, label: status.name }));
+const projectOptions = computed(() => board.value.projects.map((project) => ({
+    value: project.id,
+    label: project.name,
+})));
+
 const selectedProject = computed(() =>
     board.value.projects.find((project) => project.id === Number(projectId.value)),
 );
 const title = computed(() => selectedProject.value?.name || 'All tasks');
 const activeTasks = computed(() => board.value.tasks.filter((task) => task.status !== 'done'));
+const miniCalendar = computed(() => openTaskCalendar(board.value.tasks, month.value));
 const undated = computed(() => activeTasks.value.filter((task) => !task.due_date).length);
 const tasksByStatus = computed(() =>
     Object.fromEntries(
@@ -81,14 +97,28 @@ const tasksByStatus = computed(() =>
 );
 const visibleMilestones = computed(() =>
     board.value.milestones.filter(
-        (milestone) => !projectId.value || milestone.project_id === Number(projectId.value),
+        (milestone) => milestone.project_id === Number(projectId.value),
     ),
+);
+const selectedMilestone = computed(() =>
+    visibleMilestones.value.find((milestone) => milestone.id === Number(milestoneId.value)),
 );
 const formMilestones = computed(() =>
     board.value.milestones.filter((milestone) => milestone.project_id === Number(form.project_id)),
 );
+const milestoneFilterOptions = computed(() => [
+    { value: '', label: 'All milestones' },
+    ...visibleMilestones.value.map((item) => ({ value: String(item.id), label: item.name })),
+]);
+const milestoneFormOptions = computed(() => [
+    { value: '', label: 'No milestone' },
+    ...formMilestones.value.map((item) => ({
+        value: item.id,
+        label: `${item.name} · ${formatDate(item.due_date)}`,
+    })),
+]);
 const extendedDays = computed(() =>
-    Object.fromEntries(extendedCalendar.value.days.map((day) => [day.date, day])),
+    Object.fromEntries(board.value.calendar.days.map((day) => [day.date, day])),
 );
 
 async function api(path, method = 'GET', data) {
@@ -107,7 +137,7 @@ async function api(path, method = 'GET', data) {
     if (!response.ok) {
         if (response.status === 401) {
             authenticated.value = false;
-            dialog.value?.close();
+            closeModal();
         }
 
         if (response.status === 419) {
@@ -133,11 +163,12 @@ async function api(path, method = 'GET', data) {
     return result;
 }
 
-function boardQuery(selectedProjectId, selectedMonth) {
+function boardQuery() {
     return new URLSearchParams({
-        ...(selectedProjectId ? { project_id: selectedProjectId } : {}),
+        ...(projectId.value ? { project_id: projectId.value } : {}),
+        ...(projectId.value && milestoneId.value ? { milestone_id: milestoneId.value } : {}),
         ...(assignee.value ? { assignee: assignee.value } : {}),
-        month: selectedMonth,
+        month: month.value,
         include_done: includeDone.value ? '1' : '0',
     });
 }
@@ -147,7 +178,7 @@ async function loadBoard() {
     loading.value = true;
 
     try {
-        const result = await api(`board?${boardQuery(projectId.value, month.value)}`);
+        const result = await api(`board?${boardQuery()}`);
         // A slower response must not replace a newer project or month selection.
         if (requestId === latestBoardRequest) {
             board.value = result;
@@ -163,33 +194,37 @@ async function loadBoard() {
     }
 }
 
-async function loadCalendar() {
-    const requestId = ++latestCalendarRequest;
-    calendarLoading.value = true;
+async function refresh() {
+    await loadBoard();
+}
 
-    try {
-        const result = await api(
-            `board?${boardQuery(calendarProjectId.value, calendarMonth.value)}`,
-        );
-        if (requestId === latestCalendarRequest) {
-            extendedCalendar.value = result.calendar;
-        }
-    } catch (cause) {
-        if (requestId === latestCalendarRequest) {
-            error.value = cause.message;
-        }
-    } finally {
-        if (requestId === latestCalendarRequest) {
-            calendarLoading.value = false;
-        }
+function syncWorkspaceUrl(replace = false) {
+    const url = workspaceUrl(workspace, window.location.href);
+    if (replace || url !== window.location.href) {
+        window.history[replace ? 'replaceState' : 'pushState'](null, '', url);
     }
 }
 
-async function refresh() {
+async function restoreWorkspace() {
+    restoringHistory = true;
+    Object.assign(workspace, readWorkspaceState(window.location.search, defaultIncludeDone));
+    await nextTick();
+    restoringHistory = false;
+    syncWorkspaceUrl(true);
+}
+
+async function initializeWorkspace() {
+    workspaceLoaded = false;
     await loadBoard();
-    if (view.value === 'calendar') {
-        await loadCalendar();
+    defaultIncludeDone = board.value.defaults?.calendar_include_done ?? false;
+    const completionParameter = new URLSearchParams(window.location.search).get('include_done');
+    if (!['0', '1'].includes(completionParameter) && includeDone.value !== defaultIncludeDone) {
+        includeDone.value = defaultIncludeDone;
+        await nextTick();
+        await loadBoard();
     }
+    workspaceLoaded = true;
+    syncWorkspaceUrl(true);
 }
 
 async function signIn() {
@@ -201,8 +236,7 @@ async function signIn() {
         authenticated.value = result.authenticated;
         username.value = result.username;
         login.password = '';
-        await loadBoard();
-        includeDone.value = board.value.defaults.calendar_include_done;
+        await initializeWorkspace();
     } catch (cause) {
         error.value = cause.message;
     } finally {
@@ -214,6 +248,7 @@ async function signOut() {
     try {
         await api('session', 'DELETE');
         authenticated.value = false;
+        workspaceLoaded = false;
         assignee.value = '';
         board.value = { tasks: [], projects: [], milestones: [], calendar: { days: [], total: 0 } };
     } catch (cause) {
@@ -222,15 +257,15 @@ async function signOut() {
 }
 
 function chooseProject(id) {
-    projectId.value = id;
-    view.value = 'board';
+    const nextProjectId = id ? String(id) : '';
+    if (projectId.value !== nextProjectId) {
+        milestoneId.value = '';
+        projectId.value = nextProjectId;
+    }
 }
 
 function openCalendar() {
-    calendarMonth.value = month.value;
-    calendarProjectId.value = '';
     view.value = 'calendar';
-    loadCalendar();
 }
 
 function initialForm(type) {
@@ -252,11 +287,14 @@ function initialForm(type) {
         assignee: 'me',
         due_date: '',
         project_id: defaultProjectId,
-        milestone_id: '',
+        milestone_id: milestoneId.value,
+        depends_on_task_id: null,
     };
 }
 
 async function openModal(type, item = null, initial = {}) {
+    latestDependencyNavigation++;
+    openingDependency.value = false;
     modalType.value = type;
     editingId.value = item?.id || null;
     formError.value = '';
@@ -272,23 +310,87 @@ async function openModal(type, item = null, initial = {}) {
         }
     }
     Object.assign(form, initial);
+    formDependency.value = item?.depends_on || null;
+    initialFormSnapshot.value = formSnapshot();
 
     await nextTick();
-    dialog.value.showModal();
+    modalOpen.value = true;
+    if (!dialog.value.open) {
+        dialog.value.showModal();
+    }
 }
 
-function manageMilestone(event) {
-    const id = event.target.value;
-    if (id) {
-        const milestone = board.value.milestones.find((item) => item.id === Number(id));
-        openModal('milestone', milestone || null);
+function formSnapshot() {
+    return JSON.stringify({
+        ...form,
+        project_id: Number(form.project_id) || null,
+        milestone_id: Number(form.milestone_id) || null,
+        depends_on_task_id: Number(form.depends_on_task_id) || null,
+    });
+}
+
+function changeFormProject() {
+    form.milestone_id = '';
+    form.depends_on_task_id = null;
+    formDependency.value = null;
+}
+
+async function fetchDependencyTasks(projectId) {
+    const result = await api(`tasks?${new URLSearchParams({ project_id: projectId })}`);
+    return result.data;
+}
+
+async function openTaskDependency(taskId) {
+    if (saving.value || openingDependency.value) {
+        return;
     }
-    event.target.value = '';
+    const request = ++latestDependencyNavigation;
+    openingDependency.value = true;
+    formError.value = '';
+
+    try {
+        const result = await api(`tasks/${taskId}`);
+        if (request !== latestDependencyNavigation) {
+            return;
+        }
+        if (dialog.value.open && formSnapshot() !== initialFormSnapshot.value
+            && !confirm('Discard unsaved changes and open the prerequisite task?')) {
+            return;
+        }
+        await openModal('task', result.data);
+    } catch (cause) {
+        if (request === latestDependencyNavigation) {
+            if (dialog.value.open) {
+                formError.value = cause.message;
+            } else {
+                error.value = cause.message;
+            }
+        }
+    } finally {
+        if (request === latestDependencyNavigation) {
+            openingDependency.value = false;
+        }
+    }
+}
+
+function handleDialogClose() {
+    if (dialog.value.open || !modalOpen.value) {
+        return;
+    }
+    modalOpen.value = false;
+    formError.value = '';
+    latestDependencyNavigation++;
+    openingDependency.value = false;
+}
+
+function closeModal() {
+    dialog.value?.close();
+    handleDialogClose();
 }
 
 function closeOnBackdrop(event) {
     if (event.target === dialog.value) {
-        dialog.value.close();
+        closeModal();
     }
 }
 
@@ -303,6 +405,7 @@ async function saveForm() {
         }
         if (modalType.value === 'task') {
             payload.milestone_id = Number(payload.milestone_id) || null;
+            payload.depends_on_task_id = Number(payload.depends_on_task_id) || null;
             payload.due_date ||= null;
         }
 
@@ -312,9 +415,9 @@ async function saveForm() {
         const result = await api(path, method, payload);
 
         if (modalType.value === 'project' && !editingId.value) {
-            projectId.value = result.data.id;
+            chooseProject(result.data.id);
         }
-        dialog.value.close();
+        closeModal();
         await refresh();
     } catch (cause) {
         formError.value = cause.message;
@@ -335,13 +438,13 @@ async function deleteItem() {
 
         if (modalType.value === 'project') {
             if (Number(projectId.value) === editingId.value) {
-                projectId.value = '';
-            }
-            if (Number(calendarProjectId.value) === editingId.value) {
-                calendarProjectId.value = '';
+                chooseProject('');
             }
         }
-        dialog.value.close();
+        if (modalType.value === 'milestone' && Number(milestoneId.value) === editingId.value) {
+            milestoneId.value = '';
+        }
+        closeModal();
         await refresh();
     } catch (cause) {
         formError.value = cause.message;
@@ -363,33 +466,68 @@ async function moveTask(task, status) {
 }
 
 function startDrag(event, task) {
+    draggedTaskId.value = task.id;
     event.dataTransfer.setData('text/plain', String(task.id));
     event.dataTransfer.effectAllowed = 'move';
 }
 
-async function dropTask(event, status) {
+function endDrag() {
+    draggedTaskId.value = null;
     dragStatus.value = '';
+    dragDay.value = '';
+}
+
+async function dropTask(event, status) {
     const taskId = Number(event.dataTransfer.getData('text/plain'));
-    const task = board.value.tasks.find((task) => task.id === taskId);
+    const task = board.value.tasks.find((task) => task.id === taskId && task.id === draggedTaskId.value);
+    endDrag();
 
     if (task && task.status !== status) {
         await moveTask(task, status);
     }
 }
 
-watch([projectId, month, includeDone, assignee], () => {
-    if (authenticated.value) {
+function dragOverDay(event, cell) {
+    if (cell.inMonth && draggedTaskId.value !== null) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        dragDay.value = cell.key;
+    }
+}
+
+async function dropOnDay(event, cell) {
+    const taskId = Number(event.dataTransfer.getData('text/plain'));
+    const task = board.value.tasks.find((task) => task.id === taskId && task.id === draggedTaskId.value);
+    const payload = calendarDropPayload(task, cell.key, month.value);
+    endDrag();
+    if (!payload) {
+        return;
+    }
+
+    error.value = '';
+    try {
+        await api(`tasks/${task.id}`, 'PATCH', payload);
+        await refresh();
+    } catch (cause) {
+        error.value = cause.message;
+        await refresh();
+    }
+}
+
+watch([projectId, milestoneId, month, includeDone, assignee], () => {
+    if (authenticated.value && workspaceLoaded) {
         loadBoard();
     }
 });
 
-watch([calendarProjectId, calendarMonth, includeDone, assignee], () => {
-    if (authenticated.value && view.value === 'calendar') {
-        loadCalendar();
+watch(workspace, () => {
+    if (workspaceLoaded && !restoringHistory) {
+        syncWorkspaceUrl();
     }
 });
 
 onMounted(async () => {
+    window.addEventListener('popstate', restoreWorkspace);
     try {
         const session = await api('session');
         authenticated.value = session.authenticated;
@@ -397,8 +535,7 @@ onMounted(async () => {
         username.value = session.username;
 
         if (authenticated.value) {
-            await loadBoard();
-            includeDone.value = board.value.defaults.calendar_include_done;
+            await initializeWorkspace();
         }
     } catch {
         error.value = 'Unable to connect. Reload the page to try again.';
@@ -406,6 +543,8 @@ onMounted(async () => {
         ready.value = true;
     }
 });
+
+onUnmounted(() => window.removeEventListener('popstate', restoreWorkspace));
 </script>
 
 <template>
@@ -512,7 +651,8 @@ onMounted(async () => {
             <div class="max-md:col-start-1 max-md:row-start-2">
                 <button
                     class="nav-item"
-                    :class="{ 'nav-active': !projectId && view === 'board' }"
+                    :class="{ 'nav-active': !projectId }"
+                    :aria-current="!projectId ? 'true' : undefined"
                     @click="chooseProject('')"
                 >
                     <Icon
@@ -523,17 +663,6 @@ onMounted(async () => {
                     <span class="ml-auto text-[10px] opacity-60">
                         {{ board.projects.reduce((total, p) => total + p.tasks_count, 0) }}
                     </span>
-                </button>
-                <button
-                    class="nav-item mt-1 max-md:hidden"
-                    :class="{ 'nav-active': view === 'calendar' }"
-                    @click="openCalendar"
-                >
-                    <Icon
-                        name="calendar"
-                        :size="16"
-                    />
-                    Calendar
                 </button>
             </div>
             <div
@@ -562,15 +691,16 @@ onMounted(async () => {
                         :key="project.id"
                         class="group flex items-center rounded-lg"
                         :class="{
-                            'bg-[#e7ede3]': project.id === Number(projectId) && view === 'board',
+                            'bg-[#e7ede3]': project.id === Number(projectId),
                         }"
                     >
                         <button
                             class="nav-item min-w-0 flex-1"
                             :class="{
                                 'text-forest! font-semibold':
-                                    project.id === Number(projectId) && view === 'board',
+                                    project.id === Number(projectId),
                             }"
+                            :aria-current="project.id === Number(projectId) ? 'true' : undefined"
                             @click="chooseProject(project.id)"
                         >
                             <span
@@ -599,64 +729,17 @@ onMounted(async () => {
                     >
                         Add your first project.
                     </p>
-                    <div class="mt-7 mb-2 flex items-center justify-between">
-                        <h2
-                            class="text-[10px] font-semibold tracking-[0.14em] text-stone-400 uppercase"
-                        >
-                            Milestones
-                        </h2>
-                        <button
-                            class="icon-button h-5! w-5!"
-                            aria-label="New milestone"
-                            :disabled="!board.projects.length"
-                            @click="openModal('milestone')"
-                        >
-                            <Icon
-                                name="plus"
-                                :size="14"
-                            />
-                        </button>
-                    </div>
-                    <button
-                        v-for="milestone in visibleMilestones"
-                        :key="milestone.id"
-                        class="nav-item items-start!"
-                        @click="openModal('milestone', milestone)"
-                    >
-                        <Icon
-                            name="flag"
-                            :size="14"
-                            class="mt-0.5 shrink-0"
-                        />
-                        <span class="min-w-0">
-                            <span class="block truncate">{{ milestone.name }}</span>
-                            <span class="mt-1 block text-[10px] text-stone-400">
-                                {{ formatDate(milestone.due_date) }}
-                            </span>
-                        </span>
-                    </button>
-                    <p
-                        v-if="!visibleMilestones.length"
-                        class="px-3 text-[11px] leading-5 text-stone-400"
-                    >
-                        Small goals for your projects.
-                    </p>
                 </div>
                 <div class="hidden gap-1 max-md:flex">
-                    <select
-                        class="select-field field min-w-0 text-xs!"
-                        :value="projectId"
-                        aria-label="Filter board by project"
-                        @change="chooseProject($event.target.value)"
-                    >
-                        <option value="">All projects</option>
-                        <option
-                            v-for="project in board.projects"
-                            :value="project.id"
-                        >
-                            {{ project.name }}
-                        </option>
-                    </select>
+                    <AppSelect
+                        class="min-w-0 flex-1"
+                        :model-value="projectId"
+                        :options="[{ value: '', label: 'All projects' }, ...projectOptions]"
+                        aria-label="Filter tasks by project"
+                        compact
+                        filterable
+                        @change="chooseProject"
+                    />
                     <button
                         class="icon-button"
                         aria-label="New project"
@@ -683,16 +766,12 @@ onMounted(async () => {
             >
                 <MiniCalendar
                     :month="month"
-                    :calendar="board.calendar"
+                    :calendar="miniCalendar"
+                    :color="selectedProject?.color"
                     :loading="loading"
                     @month="month = $event"
                     @open="openCalendar"
                 />
-                <p class="mt-2 text-[9px] text-stone-400">
-                    {{ selectedProject?.name || 'All projects' }} ·
-                    {{ assignee ? assignees[assignee] : 'All assignees' }} ·
-                    {{ includeDone ? 'Done included' : 'Done excluded' }}
-                </p>
             </div>
             <div
                 class="
@@ -721,30 +800,7 @@ onMounted(async () => {
                 </button>
             </div>
         </aside>
-        <main class="flex min-h-0 min-w-0 flex-col max-md:min-h-[65dvh]">
-            <header
-                class="
-                    flex h-[76px] shrink-0 items-center justify-between border-b
-                    border-stone-200/70 bg-white/60 px-8 max-md:h-14 max-md:px-4
-                "
-            >
-                <div class="flex items-center gap-2 text-xs text-stone-400">
-                    <span>My workspace</span>
-                    <span>/</span>
-                    <span class="text-stone-600">
-                        {{ view === 'calendar' ? 'Calendar' : title }}
-                    </span>
-                </div>
-                <span class="text-[11px] text-stone-400 max-sm:hidden">
-                    {{
-                        new Intl.DateTimeFormat('en-GB', {
-                            weekday: 'long',
-                            day: 'numeric',
-                            month: 'long',
-                        }).format(new Date())
-                    }}
-                </span>
-            </header>
+        <main class="flex min-h-0 min-w-0 flex-col overflow-auto max-md:min-h-[65dvh] max-md:overflow-visible">
             <div
                 v-if="error"
                 role="alert"
@@ -761,42 +817,28 @@ onMounted(async () => {
                     />
                 </button>
             </div>
-            <section class="shrink-0 px-8 pt-8 pb-6 max-md:px-4 max-md:pt-5">
-                <div class="flex flex-wrap items-start justify-between gap-4">
-                    <div>
-                        <h1 class="text-[28px] font-semibold tracking-[-0.035em]">
-                            {{ view === 'board' ? title : 'Your month at a glance' }}
+            <section
+                class="
+                    z-10 shrink-0 border-b border-stone-200/60 bg-[#f7f8f5]/85 px-8 py-4
+                    backdrop-blur-xl md:sticky md:top-0 md:left-0 max-md:px-4
+                "
+            >
+                <div class="flex flex-wrap items-center gap-x-4 gap-y-3">
+                    <div class="min-w-0 flex-1 basis-40 max-sm:basis-full">
+                        <h1 class="truncate text-2xl leading-tight font-semibold tracking-[-0.035em]">
+                            {{ view === 'board' ? 'Kanban' : title }}
                         </h1>
-                        <p class="mt-2 text-xs text-stone-500">
-                            {{
-                                view === 'board'
-                                    ? `${activeTasks.length} open task${activeTasks.length === 1 ? '' : 's'} · ${undated} without a due date`
-                                    : 'See how deadlines are spread out and plan ahead.'
-                            }}
+                        <p class="mt-1 text-xs leading-5 text-stone-500">
+                            <template v-if="view === 'board'">
+                                {{ activeTasks.length }} open task{{ activeTasks.length === 1 ? '' : 's' }}
+                                <span v-if="undated > 0">· {{ undated }} without a due date</span>
+                            </template>
+                            <template v-else>
+                                See how deadlines are spread out and plan ahead.
+                            </template>
                         </p>
                     </div>
-                    <button
-                        class="btn btn-primary"
-                        :disabled="!board.projects.length"
-                        @click="
-                            openModal(
-                                'task',
-                                null,
-                                view === 'calendar'
-                                    ? { project_id: calendarProjectId || board.projects[0]?.id }
-                                    : {},
-                            )
-                        "
-                    >
-                        <Icon
-                            name="plus"
-                            :size="16"
-                        />
-                        New task
-                    </button>
-                </div>
-                <div class="mt-7 flex flex-wrap items-center justify-between gap-3">
-                    <div class="flex items-center gap-1 rounded-lg bg-stone-200/50 p-1">
+                    <div class="flex shrink-0 items-center gap-1 rounded-lg bg-stone-200/50 p-1">
                         <button
                             class="flex items-center gap-2 rounded-md px-3 py-1.5 text-xs"
                             :class="
@@ -805,12 +847,13 @@ onMounted(async () => {
                                     : 'text-stone-500'
                             "
                             @click="view = 'board'"
+                            :aria-pressed="view === 'board'"
                         >
                             <Icon
                                 name="grid"
                                 :size="14"
                             />
-                            Board
+                            Kanban
                         </button>
                         <button
                             class="flex items-center gap-2 rounded-md px-3 py-1.5 text-xs"
@@ -820,68 +863,93 @@ onMounted(async () => {
                                     : 'text-stone-500'
                             "
                             @click="openCalendar"
+                            :aria-pressed="view === 'calendar'"
                         >
                             <Icon
                                 name="calendar"
                                 :size="14"
                             />
-                            Full month
+                            Calendar
                         </button>
                     </div>
-                    <div class="flex flex-wrap items-center gap-3">
-                        <label class="flex items-center gap-2 text-[11px] text-stone-500">
-                            Assigned to
-                            <select
-                                class="select-field rounded-md border border-stone-200 bg-white py-1.5 pl-2 text-xs text-stone-700"
-                                v-model="assignee"
-                            >
-                                <option value="">All</option>
-                                <option
-                                    v-for="(name, key) in assignees"
-                                    :key="key"
-                                    :value="key"
-                                >
-                                    {{ name }}
-                                </option>
-                            </select>
-                        </label>
-                        <select
-                            class="select-field max-w-40 rounded-md border-0 bg-transparent py-1 text-xs text-stone-500"
-                            aria-label="Manage milestones"
-                            :disabled="!board.projects.length"
-                            @change="manageMilestone"
+                    <div
+                        class="flex min-w-0 flex-wrap items-center gap-2 max-sm:order-last max-sm:w-full"
+                        role="group"
+                        aria-label="Task filters"
+                    >
+                        <AppSelect
+                            v-model="assignee"
+                            :options="[{ value: '', label: 'All assignees' }, ...assigneeOptions]"
+                            class="w-34!"
+                            :active="!!assignee"
+                            aria-label="Assigned to"
+                            compact
+                        />
+                        <div
+                            v-if="selectedProject"
+                            class="flex h-9 min-w-0 max-w-full items-center rounded-lg border border-stone-200 bg-white shadow-xs transition hover:border-stone-300"
+                            :class="{ 'border-emerald-700/30 bg-emerald-50/70': milestoneId }"
                         >
-                            <option value="">Milestones…</option>
-                            <option value="new">+ New milestone</option>
-                            <option
-                                v-for="item in visibleMilestones"
-                                :key="item.id"
-                                :value="item.id"
-                            >
-                                {{ item.name }}
-                            </option>
-                        </select>
-                        <label class="flex items-center gap-2 text-[11px] text-stone-500">
-                            <input
-                                type="checkbox"
-                                v-model="includeDone"
-                                class="accent-emerald-800"
+                            <AppSelect
+                                v-model="milestoneId"
+                                :options="milestoneFilterOptions"
+                                class="app-select-joined w-44! min-w-0 max-w-full"
+                                :active="!!milestoneId"
+                                aria-label="Filter tasks by milestone"
+                                compact
+                                filterable
                             />
-                            Include completed tasks
-                        </label>
+                            <button
+                                type="button"
+                                class="filter-action bg-emerald-50/70 text-forest hover:bg-emerald-100/70"
+                                :class="{ 'rounded-r-lg': !selectedMilestone }"
+                                aria-label="New milestone"
+                                title="New milestone"
+                                @click="openModal('milestone')"
+                            >
+                                <Icon
+                                    name="plus"
+                                    :size="14"
+                                />
+                            </button>
+                            <button
+                                v-if="selectedMilestone"
+                                type="button"
+                                class="filter-action rounded-r-lg"
+                                :aria-label="`Edit milestone ${selectedMilestone.name}`"
+                                title="Edit selected milestone"
+                                @click="openModal('milestone', selectedMilestone)"
+                            >
+                                <Icon
+                                    name="edit"
+                                    :size="14"
+                                />
+                            </button>
+                        </div>
                         <span
-                            v-if="loading || calendarLoading"
+                            v-if="loading"
                             role="status"
                             class="text-[10px] text-stone-400"
                         >
                             Updating…
                         </span>
                     </div>
+                    <button
+                        class="btn btn-primary min-h-9! shrink-0 py-1.5! max-sm:ml-auto"
+                        :disabled="!board.projects.length"
+                        @click="openModal('task')"
+                    >
+                        <Icon
+                            name="plus"
+                            :size="16"
+                        />
+                        New task
+                    </button>
                 </div>
             </section>
             <div
                 v-if="!board.projects.length && !loading"
-                class="mx-8 mb-8 rounded-xl border border-dashed border-stone-300 bg-white p-8 text-center"
+                class="mx-8 mt-4 mb-8 rounded-xl border border-dashed border-stone-300 bg-white p-8 text-center"
             >
                 <h2 class="font-semibold">Where would you like to start?</h2>
                 <p class="mt-2 text-sm text-stone-500">
@@ -900,7 +968,7 @@ onMounted(async () => {
             </div>
             <div
                 v-else-if="view === 'board'"
-                class="min-h-0 flex-1 overflow-auto px-8 pb-8 max-md:px-4"
+                class="flex-1 px-8 pt-4 pb-8 max-md:overflow-x-auto max-md:px-4"
                 aria-label="Task board"
             >
                 <div class="grid min-h-full min-w-[960px] grid-cols-5 items-start gap-4">
@@ -945,7 +1013,9 @@ onMounted(async () => {
                                 :key="task.id"
                                 :task="task"
                                 @open="openModal('task', $event)"
+                                @open-dependency="openTaskDependency"
                                 @drag="startDrag"
+                                @dragend="endDrag"
                             />
                         </div>
                         <button
@@ -967,7 +1037,7 @@ onMounted(async () => {
             </div>
             <section
                 v-else
-                class="min-h-0 flex-1 overflow-auto px-8 pb-8 max-md:px-4"
+                class="flex-1 px-8 pt-4 pb-8 max-md:overflow-x-auto max-md:px-4"
                 aria-label="Full monthly calendar"
             >
                 <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -975,7 +1045,7 @@ onMounted(async () => {
                         <button
                             class="icon-button"
                             aria-label="Previous month in full calendar"
-                            @click="calendarMonth = shiftMonth(calendarMonth, -1)"
+                            @click="month = shiftMonth(month, -1)"
                         >
                             <Icon
                                 name="arrow"
@@ -983,52 +1053,39 @@ onMounted(async () => {
                             />
                         </button>
                         <h2 class="text-lg font-semibold capitalize">
-                            {{ monthLabel(calendarMonth) }}
+                            {{ monthLabel(month) }}
                         </h2>
                         <button
                             class="icon-button"
                             aria-label="Next month in full calendar"
-                            @click="calendarMonth = shiftMonth(calendarMonth, 1)"
+                            @click="month = shiftMonth(month, 1)"
                         >
                             <Icon name="arrow" />
                         </button>
                         <button
                             class="btn min-h-8! py-1!"
-                            @click="calendarMonth = currentMonth()"
+                            @click="month = currentMonth()"
                         >
                             Today
                         </button>
-                        <input
-                            type="month"
-                            v-model="calendarMonth"
-                            required
-                            aria-label="Jump to month"
-                            class="field w-40! text-xs!"
-                            @change="calendarMonth ||= currentMonth()"
-                        />
                     </div>
-                    <select
-                        class="select-field field w-auto! min-w-48 text-xs!"
-                        v-model="calendarProjectId"
-                        aria-label="Filter full calendar by project"
+                    <label
+                        class="ml-auto inline-flex h-8 shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 text-xs font-medium text-stone-600 shadow-xs transition hover:border-stone-300"
+                        :class="{ 'border-emerald-700/30 bg-emerald-50/70 text-forest': includeDone }"
                     >
-                        <option value="">All projects</option>
-                        <option
-                            v-for="project in board.projects"
-                            :key="project.id"
-                            :value="project.id"
-                        >
-                            {{ project.name }}
-                        </option>
-                    </select>
+                        <input
+                            type="checkbox"
+                            v-model="includeDone"
+                            class="h-3.5 w-3.5 cursor-pointer accent-emerald-800"
+                        />
+                        with Done
+                    </label>
                 </div>
                 <p class="mb-4 text-xs text-stone-500">
-                    {{ extendedCalendar.total }} task{{
-                        extendedCalendar.total === 1 ? '' : 's'
+                    {{ board.calendar.total }} task{{
+                        board.calendar.total === 1 ? '' : 's'
                     }}
-                    due · {{ assignee ? assignees[assignee] : 'All assignees' }} ·
-                    {{ includeDone ? 'Done included' : 'Done excluded' }} · The project filter is
-                    independent of the board.
+                    due · Drag a task to another day in this month to reschedule it.
                 </p>
                 <div
                     class="min-w-[750px] overflow-hidden rounded-xl border border-stone-200 bg-white"
@@ -1051,10 +1108,17 @@ onMounted(async () => {
                     </div>
                     <div class="grid grid-cols-7">
                         <div
-                            v-for="cell in monthCells(calendarMonth)"
+                            v-for="cell in monthCells(month)"
                             :key="cell.key"
                             class="min-h-32 border-r border-b border-stone-100 p-2"
-                            :class="{ 'bg-stone-50 text-stone-400': !cell.inMonth }"
+                            :class="{
+                                'bg-stone-50 text-stone-400': !cell.inMonth,
+                                'bg-emerald-50 inset-ring-2 inset-ring-emerald-700': dragDay === cell.key,
+                            }"
+                            :data-date="cell.key"
+                            @dragover="dragOverDay($event, cell)"
+                            @dragleave.self="dragDay = ''"
+                            @drop.prevent="dropOnDay($event, cell)"
                         >
                             <div class="mb-2 flex items-center justify-between">
                                 <button
@@ -1068,7 +1132,6 @@ onMounted(async () => {
                                     @click="
                                         openModal('task', null, {
                                             due_date: cell.key,
-                                            project_id: calendarProjectId || board.projects[0]?.id,
                                         })
                                     "
                                 >
@@ -1085,6 +1148,9 @@ onMounted(async () => {
                                 v-for="task in extendedDays[cell.key]?.tasks || []"
                                 :key="task.id"
                                 @click="openModal('task', task)"
+                                draggable="true"
+                                @dragstart="startDrag($event, task)"
+                                @dragend="endDrag"
                                 class="
                                     mb-1.5 block w-full rounded-md
                                     border-l-2 bg-[#f1f5ef] px-2 py-1.5
@@ -1116,16 +1182,15 @@ onMounted(async () => {
 
     <dialog
         ref="dialog"
-        class="w-[540px] max-w-[calc(100%-2rem)] rounded-2xl border border-stone-200 bg-[#fbfcf9] p-0 shadow-2xl"
-        @close="formError = ''"
+        class="workspace-dialog max-w-[calc(100%-1.5rem)] rounded-2xl border border-stone-200 bg-[#fbfcf9] p-0 shadow-2xl"
+        :class="modalType === 'task' ? 'task-dialog w-[900px]' : 'w-[480px]'"
+        @close="handleDialogClose"
+        @cancel.prevent="closeModal"
         @click="closeOnBackdrop"
     >
         <form @submit.prevent="saveForm">
-            <div class="flex items-center justify-between border-b border-stone-200 px-6 py-5">
+            <div class="dialog-header flex items-center justify-between border-b border-stone-200 px-5 py-3">
                 <div>
-                    <p class="mb-1 text-[10px] tracking-widest text-stone-400 uppercase">
-                        Your personal workspace
-                    </p>
                     <h2 class="text-lg font-semibold">
                         {{ editingId ? 'Edit' : 'New' }} {{ modalType }}
                     </h2>
@@ -1134,19 +1199,22 @@ onMounted(async () => {
                     type="button"
                     class="icon-button"
                     aria-label="Close dialog"
-                    @click="dialog.close()"
+                    @click="closeModal"
                 >
                     <Icon name="close" />
                 </button>
             </div>
-            <div class="grid gap-4 p-6">
-                <label>
+            <div
+                class="dialog-body grid min-w-0 gap-3 p-5 max-sm:p-4"
+                :class="modalType === 'task' ? 'task-form grid-cols-2' : 'grid-cols-1'"
+            >
+                <label class="col-span-full min-w-0">
                     <span class="label">
                         Name
                         <span class="text-emerald-700">*</span>
                     </span>
                     <input
-                        class="field"
+                        class="field min-w-0"
                         v-model="form.name"
                         required
                         :maxlength="
@@ -1156,131 +1224,87 @@ onMounted(async () => {
                     />
                 </label>
                 <template v-if="modalType !== 'project'">
-                    <label>
+                    <label class="min-w-0">
                         <span class="label">
                             Project
                             <span class="text-emerald-700">*</span>
                         </span>
-                        <select
-                            class="select-field field"
+                        <AppSelect
                             v-model="form.project_id"
-                            required
+                            :options="projectOptions"
+                            aria-label="Project"
+                            aria-required="true"
+                            placeholder="Select a project"
+                            filterable
                             :disabled="modalType === 'milestone' && !!editingId"
-                            @change="form.milestone_id = ''"
-                        >
-                            <option
-                                value=""
-                                disabled
-                            >
-                                Select a project
-                            </option>
-                            <option
-                                v-for="project in board.projects"
-                                :key="project.id"
-                                :value="project.id"
-                            >
-                                {{ project.name }}
-                            </option>
-                        </select>
+                            @change="changeFormProject"
+                        />
                     </label>
-                    <label v-if="modalType === 'task'">
+                    <label v-if="modalType === 'task'" class="min-w-0">
                         <span class="label">
                             Milestone
                             <span class="font-normal text-stone-400">· optional</span>
                         </span>
-                        <select
-                            class="select-field field"
+                        <AppSelect
                             v-model="form.milestone_id"
-                        >
-                            <option value="">No milestone</option>
-                            <option
-                                v-for="item in formMilestones"
-                                :key="item.id"
-                                :value="item.id"
-                            >
-                                {{ item.name }} · {{ formatDate(item.due_date) }}
-                            </option>
-                        </select>
+                            :options="milestoneFormOptions"
+                            aria-label="Milestone"
+                            filterable
+                        />
                     </label>
-                    <label v-if="modalType === 'task'">
+                    <TaskDependencySelect
+                        v-if="modalType === 'task' && modalOpen"
+                        class="col-span-full"
+                        v-model="form.depends_on_task_id"
+                        :project-id="form.project_id"
+                        :task-id="editingId"
+                        :selected-task="formDependency"
+                        :fetch-tasks="fetchDependencyTasks"
+                        :disabled="saving || openingDependency"
+                        @select="formDependency = $event"
+                        @open="openTaskDependency"
+                    />
+                    <label v-if="modalType === 'task'" class="form-description flex min-h-0 min-w-0 flex-col max-sm:col-span-full">
                         <span class="label">Description</span>
                         <textarea
-                            class="field min-h-24 resize-y"
+                            class="field min-h-0 min-w-0 flex-1 resize-none"
                             v-model="form.description"
+                            rows="4"
                             maxlength="20000"
                             placeholder="What needs to be done?"
                         ></textarea>
                     </label>
-                    <div class="grid grid-cols-2 gap-4">
-                        <label>
+                    <div
+                        class="grid min-w-0 content-start gap-3 max-sm:col-span-full"
+                        :class="modalType === 'task' ? 'grid-cols-2' : 'grid-cols-1'"
+                    >
+                        <label class="min-w-0">
                             <span class="label">
                                 Due date {{ modalType === 'milestone' ? '*' : '' }}
                             </span>
                             <input
-                                class="field"
+                                class="field min-w-0 max-w-full"
                                 type="date"
                                 v-model="form.due_date"
                                 :required="modalType === 'milestone'"
                             />
                         </label>
-                        <label v-if="modalType === 'task'">
-                            <span class="label">Priority</span>
-                            <select
-                                class="select-field field"
-                                v-model="form.priority"
-                            >
-                                <option
-                                    v-for="(name, key) in priorities"
-                                    :key="key"
-                                    :value="key"
-                                >
-                                    {{ name }}
-                                </option>
-                            </select>
-                        </label>
-                    </div>
-                    <template v-if="modalType === 'task'">
-                        <div class="grid grid-cols-2 gap-4">
-                            <label>
-                                <span class="label">Column</span>
-                                <select
-                                    class="select-field field"
-                                    v-model="form.status"
-                                >
-                                    <option
-                                        v-for="status in statuses"
-                                        :key="status.key"
-                                        :value="status.key"
-                                    >
-                                        {{ status.name }}
-                                    </option>
-                                </select>
+                        <template v-if="modalType === 'task'">
+                            <label class="min-w-0">
+                                <span class="label">Priority</span>
+                                <AppSelect v-model="form.priority" :options="priorityOptions" aria-label="Priority" />
                             </label>
-                            <label>
+                            <label class="min-w-0">
+                                <span class="label">Status</span>
+                                <AppSelect v-model="form.status" :options="statusOptions" aria-label="Status" />
+                            </label>
+                            <label class="min-w-0">
                                 <span class="label">Assigned to</span>
-                                <select
-                                    class="select-field field"
-                                    v-model="form.assignee"
-                                >
-                                    <option
-                                        v-for="(name, key) in assignees"
-                                        :key="key"
-                                        :value="key"
-                                    >
-                                        {{ name }}
-                                    </option>
-                                </select>
+                                <AppSelect v-model="form.assignee" :options="assigneeOptions" aria-label="Assigned to" />
                             </label>
-                        </div>
-                        <p class="text-[11px] leading-5 text-stone-400">
-                            The due date places the task in the calendar. Leave it blank to schedule
-                            it later.
-                        </p>
-                    </template>
-                    <p
-                        v-else
-                        class="text-[11px] leading-5 text-stone-400"
-                    >
+                        </template>
+                    </div>
+                    <p v-if="modalType === 'milestone'" class="text-[11px] leading-5 text-stone-400">
                         Milestone and task due dates are independent.
                     </p>
                 </template>
@@ -1325,12 +1349,12 @@ onMounted(async () => {
                 <p
                     v-if="formError"
                     role="alert"
-                    class="rounded-lg bg-red-50 px-3 py-2 text-xs leading-5 text-red-800"
+                    class="col-span-full rounded-lg bg-red-50 px-3 py-2 text-xs leading-5 text-red-800"
                 >
                     {{ formError }}
                 </p>
             </div>
-            <div class="flex items-center justify-between border-t border-stone-200 px-6 py-4">
+            <div class="dialog-footer flex items-center justify-between border-t border-stone-200 px-5 py-3">
                 <button
                     v-if="editingId"
                     type="button"
@@ -1350,7 +1374,7 @@ onMounted(async () => {
                         type="button"
                         class="btn"
                         :disabled="saving"
-                        @click="dialog.close()"
+                        @click="closeModal"
                     >
                         Cancel
                     </button>

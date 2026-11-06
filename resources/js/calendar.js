@@ -10,6 +10,47 @@ export function currentMonth() {
     return dateKey().slice(0, 7);
 }
 
+export function openTaskCalendar(tasks, month) {
+    const counts = new Map();
+    let total = 0;
+
+    for (const task of tasks) {
+        if (task.status === 'done' || !task.due_date?.startsWith(`${month}-`)) {
+            continue;
+        }
+
+        counts.set(task.due_date, (counts.get(task.due_date) || 0) + 1);
+        total++;
+    }
+
+    return {
+        days: Array.from(counts, ([date, count]) => ({ date, count })),
+        total,
+    };
+}
+
+export function calendarHeatmapStyle(color) {
+    if (!/^#[0-9a-f]{6}$/i.test(color)) {
+        return {};
+    }
+
+    const channels = [1, 3, 5].map((offset) => parseInt(color.slice(offset, offset + 2), 16));
+    const style = { '--calendar-accent': color };
+
+    for (const [index, intensity] of [0.18, 0.38, 0.68, 1].entries()) {
+        const background = channels.map((channel) => Math.round(255 + (channel - 255) * intensity));
+        const linear = background.map((channel) => {
+            const value = channel / 255;
+            return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+        });
+        const luminance = linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+        style[`--calendar-heat-${index + 1}`] = `rgb(${background.join(', ')})`;
+        style[`--calendar-heat-${index + 1}-text`] = luminance > 0.179 ? '#000000' : '#ffffff';
+    }
+
+    return style;
+}
+
 export function monthLabel(month) {
     return new Intl.DateTimeFormat('en-GB', {
         month: 'long',
@@ -50,6 +91,17 @@ export function formatDate(date) {
         day: 'numeric',
         month: 'short',
     }).format(new Date(`${date}T12:00:00`));
+}
+
+export function calendarDropPayload(task, date, month) {
+    if (!task?.due_date?.startsWith(`${month}-`) || task.due_date === date) {
+        return null;
+    }
+    if (!monthCells(month).some((cell) => cell.inMonth && cell.key === date)) {
+        return null;
+    }
+
+    return { due_date: date };
 }
 
 export const statuses = [

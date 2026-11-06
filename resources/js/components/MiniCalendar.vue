@@ -1,8 +1,8 @@
 <script setup>
 import { computed } from 'vue';
-import { monthCells, monthLabel, shiftMonth } from '../calendar';
+import { calendarHeatmapStyle, monthCells, monthLabel, shiftMonth } from '../calendar';
 import Icon from './Icon.vue';
-const props = defineProps({ calendar: Object, month: String, loading: Boolean });
+const props = defineProps({ calendar: Object, month: String, loading: Boolean, color: String });
 defineEmits(['month', 'open']);
 const days = computed(() =>
     Object.fromEntries((props.calendar?.days || []).map((day) => [day.date, day.count])),
@@ -28,6 +28,7 @@ function shade(count) {
     <section
         aria-label="Compact deadline calendar"
         class="mini-calendar"
+        :style="calendarHeatmapStyle(color)"
     >
         <div class="mb-3 flex items-center justify-between">
             <h2 class="text-xs font-semibold capitalize text-stone-700">{{ monthLabel(month) }}</h2>
@@ -70,7 +71,7 @@ function shade(count) {
                     class="mini-day"
                     :class="[
                         cell.inMonth ? shade(days[cell.key] || 0) : 'opacity-25',
-                        { 'ring-1 ring-emerald-800 ring-offset-1': cell.today },
+                        { 'mini-today ring-1 ring-offset-1': cell.today },
                     ]"
                     :title="`${cell.key}: ${days[cell.key] || 0} task${days[cell.key] === 1 ? '' : 's'} due`"
                 >

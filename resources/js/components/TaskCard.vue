@@ -1,9 +1,10 @@
 <script setup>
 import Icon from './Icon.vue';
+import TaskDependencyLink from './TaskDependencyLink.vue';
 import { dateKey, formatDate, priorities } from '../calendar';
 import { assignees } from '../assignees';
 defineProps({ task: Object });
-defineEmits(['open', 'drag']);
+defineEmits(['open', 'drag', 'open-dependency']);
 </script>
 <template>
     <article
@@ -20,12 +21,10 @@ defineEmits(['open', 'drag']);
                 ></span>
                 <span class="truncate">{{ task.project.name }}</span>
             </span>
-            <span
-                class="priority"
-                :class="`priority-${task.priority}`"
-            >
-                {{ priorities[task.priority] }}
-            </span>
+            <div class="flex shrink-0 items-center gap-1">
+                <TaskDependencyLink v-if="task.depends_on" :dependency="task.depends_on" @open="$emit('open-dependency', $event)" />
+                <span class="priority" :class="`priority-${task.priority}`">{{ priorities[task.priority] }}</span>
+            </div>
         </div>
         <button
             class="w-full text-left text-[13px] leading-5 font-semibold text-stone-800 focus-visible:outline-offset-4"

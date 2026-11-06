@@ -34,7 +34,7 @@ class GetContext extends MeMyselfAiTool
                 'projects' => ['read'],
                 'tasks' => ['read', 'create', 'update'],
                 'milestones' => ['read', 'create', 'update'],
-                'task_update_fields' => ['name', 'description', 'priority', 'status', 'assignee', 'due_date'],
+                'task_update_fields' => ['name', 'description', 'priority', 'status', 'assignee', 'due_date', 'depends_on_task_id'],
                 'milestone_update_fields' => ['name', 'due_date'],
             ],
         ]);

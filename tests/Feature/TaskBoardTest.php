@@ -121,7 +121,7 @@ it('requires clearing the old milestone when moving a task to another project', 
     $this->assertDatabaseHas('tasks', ['id' => $task->id, 'project_id' => $other->id, 'milestone_id' => null]);
 });
 
-it('filters board and compact calendar while allowing the extended month to request all projects independently', function (): void {
+it('filters board tasks and calendar counts by the selected project', function (): void {
     $one = Task::factory()->create(['due_date' => '2026-11-10']);
     Task::factory()->create(['due_date' => '2026-11-10']);
 
@@ -129,6 +129,73 @@ it('filters board and compact calendar while allowing the extended month to requ
         ->assertJsonCount(1, 'tasks')->assertJsonPath('calendar.total', 1)->assertJsonPath('calendar.days.0.count', 1);
     $this->getJson('/api/v1/board?month=2026-11')->assertOk()
         ->assertJsonCount(2, 'tasks')->assertJsonPath('calendar.total', 2)->assertJsonPath('calendar.days.0.count', 2);
+});
+
+it('filters board tasks and calendar counts by a project milestone together with assignment and completion', function (): void {
+    $project = Project::factory()->create();
+    $milestone = Milestone::factory()->for($project)->create();
+    $otherMilestone = Milestone::factory()->for($project)->create();
+    $scheduled = Task::factory()->for($project)->for($milestone)->create(['assignee' => 'agent', 'due_date' => '2026-11-10']);
+    $done = Task::factory()->for($project)->for($milestone)->create(['assignee' => 'agent', 'due_date' => '2026-11-10', 'status' => 'done']);
+    Task::factory()->for($project)->for($milestone)->create(['assignee' => 'me', 'due_date' => '2026-11-10']);
+    $undated = Task::factory()->for($project)->for($milestone)->create(['assignee' => 'agent', 'due_date' => null]);
+    Task::factory()->for($project)->for($otherMilestone)->create(['assignee' => 'agent', 'due_date' => '2026-11-10']);
+    Task::factory()->for($project)->create(['assignee' => 'agent', 'due_date' => '2026-11-10']);
+    $query = '/api/v1/board?month=2026-11&project_id='.$project->id.'&milestone_id='.$milestone->id.'&assignee=agent';
+
+    $this->getJson($query)->assertOk()
+        ->assertJsonCount(3, 'tasks')->assertJsonPath('tasks.0.id', $scheduled->id)
+        ->assertJsonPath('tasks.1.id', $done->id)->assertJsonPath('tasks.2.id', $undated->id)
+        ->assertJsonPath('calendar.milestone_id', $milestone->id)
+        ->assertJsonPath('calendar.total', 1)->assertJsonCount(1, 'calendar.days.0.tasks')
+        ->assertJsonPath('calendar.days.0.tasks.0.id', $scheduled->id)
+        ->assertJsonPath('projects.0.tasks_count', 6)->assertJsonCount(2, 'milestones');
+    $this->getJson($query.'&include_done=1')->assertOk()
+        ->assertJsonPath('calendar.total', 2)->assertJsonCount(2, 'calendar.days.0.tasks');
+    $this->getJson('/api/v1/board?month=2026-11&project_id='.$project->id)->assertOk()
+        ->assertJsonCount(6, 'tasks')->assertJsonPath('calendar.total', 4);
+});
+
+it('rejects a milestone filter without its project with 422', function (): void {
+    $milestone = Milestone::factory()->create();
+
+    $this->getJson('/api/v1/board?milestone_id='.$milestone->id)
+        ->assertUnprocessable()->assertJsonValidationErrors('project_id');
+});
+
+it('rejects a milestone filter belonging to another project with 422', function (): void {
+    $project = Project::factory()->create();
+    $milestone = Milestone::factory()->create();
+
+    $this->getJson('/api/v1/board?project_id='.$project->id.'&milestone_id='.$milestone->id)
+        ->assertUnprocessable()->assertJsonValidationErrors('milestone_id');
+});
+
+it('rejects invalid milestone filters with 422', function (string $query): void {
+    $project = Project::factory()->create();
+
+    $this->getJson('/api/v1/board?project_id='.$project->id.'&'.$query)
+        ->assertUnprocessable()->assertJsonValidationErrors('milestone_id');
+})->with(['milestone_id=9999', 'milestone_id=invalid', 'milestone_id[]=1']);
+
+it('reschedules a calendar task within its month while preserving its other details', function (): void {
+    $milestone = Milestone::factory()->create();
+    $task = Task::factory()->for($milestone)->create([
+        'project_id' => $milestone->project_id, 'due_date' => '2026-11-04',
+        'status' => 'in_progress', 'assignee' => 'agent', 'priority' => 'high',
+    ]);
+
+    $this->patchJson('/api/v1/tasks/'.$task->id, ['due_date' => '2026-11-20'])
+        ->assertOk()->assertJsonPath('data.due_date', '2026-11-20');
+
+    $this->assertDatabaseHas('tasks', [
+        'id' => $task->id, 'due_date' => '2026-11-20', 'project_id' => $milestone->project_id,
+        'milestone_id' => $milestone->id, 'status' => 'in_progress', 'assignee' => 'agent', 'priority' => 'high',
+    ]);
+    $this->getJson('/api/v1/board?month=2026-11')->assertOk()
+        ->assertJsonPath('calendar.total', 1)->assertJsonCount(1, 'calendar.days')
+        ->assertJsonPath('calendar.days.0.date', '2026-11-20')
+        ->assertJsonPath('calendar.days.0.tasks.0.id', $task->id);
 });
 
 it('uses only task due dates and applies the same Done rule to heat counts and day cells', function (): void {

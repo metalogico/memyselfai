@@ -19,6 +19,8 @@ class TaskResource extends JsonResource
             'due_date' => $this->due_date?->toDateString(),
             'project_id' => $this->project_id,
             'milestone_id' => $this->milestone_id,
+            'depends_on_task_id' => $this->depends_on_task_id,
+            'depends_on' => $this->whenLoaded('dependsOn', fn () => $this->dependsOn?->only(['id', 'name'])),
             'project' => $this->whenLoaded('project', fn () => $this->project->only(['id', 'name', 'color'])),
             'milestone' => $this->whenLoaded('milestone', fn () => $this->milestone ? [
                 'id' => $this->milestone->id,
