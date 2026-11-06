@@ -1,0 +1,40 @@
+name: sh-memyselfai
+
+x-environment: &environment
+  APP_ENV: production
+  APP_DEBUG: "false"
+  APP_URL: ${MEMYSELFAI_URL:-http://localhost:8092}
+  APP_TIMEZONE: Europe/Rome
+  DB_CONNECTION: sqlite
+  DB_DATABASE: /var/lib/sh-memyselfai/database.sqlite
+  DB_FOREIGN_KEYS: "true"
+  SESSION_DRIVER: file
+  SESSION_COOKIE: ${SESSION_COOKIE:-sh_memyselfai_session}
+  SESSION_SECURE_COOKIE: ${SESSION_SECURE_COOKIE:-false}
+  CACHE_STORE: file
+  QUEUE_CONNECTION: sync
+  LOG_CHANNEL: stderr
+
+services:
+  app:
+    image: ${MEMYSELFAI_IMAGE:-ghcr.io/metalogico/memyselfai:latest}
+    init: true
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file: ${MEMYSELFAI_ENV_FILE:-.env}
+    environment: *environment
+    ports:
+      - "${MEMYSELFAI_BIND_IP:-127.0.0.1}:${MEMYSELFAI_PORT:-8092}:80"
+    volumes:
+      - data:/var/lib/sh-memyselfai
+      - storage:/var/www/html/storage
+    healthcheck:
+      test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1/up') === false ? 1 : 0);"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  data:
+  storage:
