@@ -3,3 +3,6 @@ services:
   app:
     build: .
     image: ${MEMYSELFAI_BUILD_IMAGE:-memyselfai:dev}
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"

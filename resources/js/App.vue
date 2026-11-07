@@ -7,6 +7,7 @@ import TaskDependencySelect from './components/TaskDependencySelect.vue';
 import AppSelect from './components/AppSelect.vue';
 import { assignees } from './assignees';
 import { readWorkspaceState, workspaceUrl } from './workspaceState';
+import { filterTaskCalendar, filterTasks } from './taskSearch';
 import {
     calendarDropPayload,
     currentMonth,
@@ -32,6 +33,9 @@ const saving = ref(false);
 const loading = ref(false);
 const workspace = reactive(readWorkspaceState(window.location.search));
 const { projectId, milestoneId, month, includeDone, assignee, view } = toRefs(workspace);
+const searchQuery = ref('');
+const searchInput = ref(null);
+const searchShortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K';
 const board = ref({ tasks: [], projects: [], milestones: [], calendar: { days: [], total: 0 } });
 const dragStatus = ref('');
 const dragDay = ref('');
@@ -83,15 +87,20 @@ const projectOptions = computed(() => board.value.projects.map((project) => ({
 const selectedProject = computed(() =>
     board.value.projects.find((project) => project.id === Number(projectId.value)),
 );
-const title = computed(() => selectedProject.value?.name || 'All tasks');
-const activeTasks = computed(() => board.value.tasks.filter((task) => task.status !== 'done'));
-const miniCalendar = computed(() => openTaskCalendar(board.value.tasks, month.value));
+const title = computed(() => selectedProject.value?.name || 'All Tasks');
+const searchActive = computed(() => searchQuery.value.trim().length > 0);
+const visibleTasks = computed(() => filterTasks(board.value.tasks, searchQuery.value));
+const visibleCalendar = computed(() => filterTaskCalendar(board.value.calendar, searchQuery.value));
+const noSearchResults = computed(() => searchActive.value
+    && (view.value === 'board' ? visibleTasks.value.length === 0 : visibleCalendar.value.total === 0));
+const activeTasks = computed(() => visibleTasks.value.filter((task) => task.status !== 'done'));
+const miniCalendar = computed(() => openTaskCalendar(visibleTasks.value, month.value));
 const undated = computed(() => activeTasks.value.filter((task) => !task.due_date).length);
 const tasksByStatus = computed(() =>
     Object.fromEntries(
         statuses.map((status) => [
             status.key,
-            board.value.tasks.filter((task) => task.status === status.key),
+            visibleTasks.value.filter((task) => task.status === status.key),
         ]),
     ),
 );
@@ -118,8 +127,25 @@ const milestoneFormOptions = computed(() => [
     })),
 ]);
 const extendedDays = computed(() =>
-    Object.fromEntries(board.value.calendar.days.map((day) => [day.date, day])),
+    Object.fromEntries(visibleCalendar.value.days.map((day) => [day.date, day])),
 );
+
+function clearSearch() {
+    searchQuery.value = '';
+    searchInput.value?.focus();
+}
+
+function handleSearchShortcut(event) {
+    if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'k'
+        || event.altKey || event.shiftKey || event.isComposing
+        || !authenticated.value || modalOpen.value || !searchInput.value) {
+        return;
+    }
+
+    event.preventDefault();
+    searchInput.value.focus();
+    searchInput.value.select();
+}
 
 async function api(path, method = 'GET', data) {
     const response = await fetch(`/api/v1/${path}`, {
@@ -249,6 +275,7 @@ async function signOut() {
         await api('session', 'DELETE');
         authenticated.value = false;
         workspaceLoaded = false;
+        searchQuery.value = '';
         assignee.value = '';
         board.value = { tasks: [], projects: [], milestones: [], calendar: { days: [], total: 0 } };
     } catch (cause) {
@@ -514,6 +541,10 @@ async function dropOnDay(event, cell) {
     }
 }
 
+watch(projectId, () => {
+    searchQuery.value = '';
+});
+
 watch([projectId, milestoneId, month, includeDone, assignee], () => {
     if (authenticated.value && workspaceLoaded) {
         loadBoard();
@@ -528,6 +559,7 @@ watch(workspace, () => {
 
 onMounted(async () => {
     window.addEventListener('popstate', restoreWorkspace);
+    window.addEventListener('keydown', handleSearchShortcut);
     try {
         const session = await api('session');
         authenticated.value = session.authenticated;
@@ -544,7 +576,10 @@ onMounted(async () => {
     }
 });
 
-onUnmounted(() => window.removeEventListener('popstate', restoreWorkspace));
+onUnmounted(() => {
+    window.removeEventListener('popstate', restoreWorkspace);
+    window.removeEventListener('keydown', handleSearchShortcut);
+});
 </script>
 
 <template>
@@ -826,7 +861,7 @@ onUnmounted(() => window.removeEventListener('popstate', restoreWorkspace));
                 <div class="flex flex-wrap items-center gap-x-4 gap-y-3">
                     <div class="min-w-0 flex-1 basis-40 max-sm:basis-full">
                         <h1 class="truncate text-2xl leading-tight font-semibold tracking-[-0.035em]">
-                            {{ view === 'board' ? 'Kanban' : title }}
+                            {{ title }}
                         </h1>
                         <p class="mt-1 text-xs leading-5 text-stone-500">
                             <template v-if="view === 'board'">
@@ -837,6 +872,37 @@ onUnmounted(() => window.removeEventListener('popstate', restoreWorkspace));
                                 See how deadlines are spread out and plan ahead.
                             </template>
                         </p>
+                    </div>
+                    <div
+                        role="search"
+                        aria-label="Task search"
+                        class="flex h-9 w-64 min-w-0 shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-white px-2.5 shadow-xs transition focus-within:border-emerald-700 focus-within:ring-2 focus-within:ring-emerald-700/10 max-sm:w-full"
+                    >
+                        <Icon name="search" :size="15" class="shrink-0 text-stone-400" />
+                        <input
+                            ref="searchInput"
+                            v-model="searchQuery"
+                            type="search"
+                            placeholder="Search tasks…"
+                            aria-label="Search tasks by title or description"
+                            aria-keyshortcuts="Meta+K Control+K"
+                            autocomplete="off"
+                            class="min-w-0 flex-1 bg-transparent text-xs text-stone-800 outline-none placeholder:text-stone-400 focus-visible:outline-none [&::-webkit-search-cancel-button]:appearance-none"
+                            @keydown.esc.prevent="clearSearch"
+                        />
+                        <kbd
+                            aria-hidden="true"
+                            class="shrink-0 rounded border border-stone-200 bg-stone-50 px-1 py-0.5 font-sans text-[10px] text-stone-400"
+                        >{{ searchShortcut }}</kbd>
+                        <button
+                            v-if="searchQuery"
+                            type="button"
+                            class="icon-button h-6! w-6!"
+                            aria-label="Clear task search"
+                            @click="clearSearch"
+                        >
+                            <Icon name="close" :size="13" />
+                        </button>
                     </div>
                     <div class="flex shrink-0 items-center gap-1 rounded-lg bg-stone-200/50 p-1">
                         <button
@@ -947,6 +1013,16 @@ onUnmounted(() => window.removeEventListener('popstate', restoreWorkspace));
                     </button>
                 </div>
             </section>
+            <div
+                v-if="noSearchResults && !loading && board.projects.length"
+                role="status"
+                class="mx-8 mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-stone-300 bg-white p-4 text-xs text-stone-500 max-md:mx-4"
+            >
+                <p>No tasks match your search.</p>
+                <button type="button" class="btn min-h-8! py-1!" @click="clearSearch">
+                    Clear search
+                </button>
+            </div>
             <div
                 v-if="!board.projects.length && !loading"
                 class="mx-8 mt-4 mb-8 rounded-xl border border-dashed border-stone-300 bg-white p-8 text-center"
@@ -1082,8 +1158,8 @@ onUnmounted(() => window.removeEventListener('popstate', restoreWorkspace));
                     </label>
                 </div>
                 <p class="mb-4 text-xs text-stone-500">
-                    {{ board.calendar.total }} task{{
-                        board.calendar.total === 1 ? '' : 's'
+                    {{ visibleCalendar.total }} task{{
+                        visibleCalendar.total === 1 ? '' : 's'
                     }}
                     due · Drag a task to another day in this month to reschedule it.
                 </p>
